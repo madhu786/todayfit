@@ -641,7 +641,7 @@ export default function TodayFit() {
       <div className="tf-wrap">
         <div className="tf-brand">
           <div className="dot" />
-          <div className="tf-brand-name">TodayFit — daily exercise picks</div>
+          <div className="tf-brand-name">TodayFit — your daily training plan</div>
         </div>
 
         {stage === "form" && (
