@@ -1,5 +1,41 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { Dumbbell, Ruler, Weight, CalendarDays, RefreshCw, ChevronDown, ChevronUp, HeartPulse, ShieldAlert, Sparkles } from "lucide-react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
+import { Dumbbell, Ruler, Weight, CalendarDays, ChevronDown, ChevronUp, ShieldAlert, Sparkles, ArrowRight, ArrowLeft, CheckCircle2, Circle, Timer, RotateCcw, Flame, Trophy, Wind } from "lucide-react";
+
+const HISTORY_KEY = "todayfit-history";
+
+function loadHistory() {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(history) {
+  try {
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  } catch {
+    // ignore storage errors (private browsing, quota, etc.)
+  }
+}
+
+function computeStreak(history) {
+  if (!history.length) return 0;
+  const days = new Set(history.map((h) => h.date));
+  let streak = 0;
+  const cursor = new Date();
+  for (;;) {
+    const key = cursor.toISOString().slice(0, 10);
+    if (days.has(key)) {
+      streak += 1;
+      cursor.setDate(cursor.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+  return streak;
+}
 
 /* ------------------------------------------------------------------ */
 /*  FONTS                                                              */
@@ -82,28 +118,27 @@ const EXERCISES = [
   { id: "n2", name: "Neck Rotation", category: "neck", equipment: "bodyweight", target: "Neck", secondary: "", anim: "stretch", sets: 2, reps: 20, holdSeconds: true, cues: ["Slowly turn your head to one side", "Hold briefly, keep shoulders relaxed", "Return to center and repeat other side"] },
 ];
 
-const CATEGORY_LABEL = {
-  chest: "Chest", back: "Back", upperLegs: "Upper Legs", lowerLegs: "Lower Legs",
-  shoulders: "Shoulders", upperArms: "Upper Arms", lowerArms: "Lower Arms",
-  waist: "Core", cardio: "Cardio", neck: "Neck",
-};
+/* ------------------------------------------------------------------ */
+/*  WORKOUT CATEGORIES                                                 */
+/* ------------------------------------------------------------------ */
+const CATEGORIES = [
+  { id: "chest", label: "Chest", tone: "Push strength and size" },
+  { id: "back", label: "Back", tone: "Pull strength and posture" },
+  { id: "shoulders", label: "Shoulders", tone: "Broader, more defined delts" },
+  { id: "upperArms", label: "Biceps & Triceps", tone: "Upper-arm strength and size" },
+  { id: "lowerArms", label: "Forearms", tone: "Grip and forearm strength" },
+  { id: "upperLegs", label: "Upper Legs", tone: "Quads, glutes, hamstrings" },
+  { id: "lowerLegs", label: "Lower Legs", tone: "Calves and ankle stability" },
+  { id: "waist", label: "Core", tone: "Abs and obliques" },
+  { id: "cardio", label: "Cardio", tone: "Heart rate and endurance" },
+  { id: "neck", label: "Neck", tone: "Mobility and light recovery" },
+];
 
 const EQUIPMENT_OPTIONS = [
   { id: "bodyweight", label: "Bodyweight only" },
   { id: "dumbbell", label: "Dumbbells" },
   { id: "band", label: "Resistance band" },
 ];
-
-// Weekday split — rotates automatically so "today" really changes day to day
-const SPLIT = {
-  0: { label: "Active Recovery", categories: ["neck", "waist"], tone: "Easy does it — mobility and light core." },
-  1: { label: "Push Day", categories: ["chest", "shoulders", "upperArms"], tone: "Chest, shoulders, triceps." },
-  2: { label: "Leg Day", categories: ["upperLegs", "lowerLegs"], tone: "Quads, glutes, calves." },
-  3: { label: "Pull Day", categories: ["back", "upperArms", "lowerArms"], tone: "Back and biceps." },
-  4: { label: "Core Day", categories: ["waist", "lowerArms"], tone: "Abs, obliques, grip." },
-  5: { label: "Full Body + Cardio", categories: ["cardio", "upperLegs", "chest"], tone: "Sweat and full-body strength." },
-  6: { label: "Mobility & Stretch", categories: ["neck", "waist", "lowerLegs"], tone: "Slow it down, recover well." },
-};
 
 /* ------------------------------------------------------------------ */
 /*  BMI helpers                                                        */
@@ -118,27 +153,31 @@ function bmiInfo(weightKg, heightCm) {
   return { bmi: Math.round(bmi * 10) / 10, label };
 }
 
-function pickPlan({ age, weightKg, heightCm, equipment, day, focusOverride }) {
-  const split = SPLIT[day];
-  const categories = focusOverride && focusOverride.length ? focusOverride : split.categories;
+const WARMUP_IDS = ["cr1", "cr2"];
+const COOLDOWN_IDS = ["n1", "n2"];
+
+function getWarmUp() {
+  return EXERCISES.filter((e) => WARMUP_IDS.includes(e.id)).map((ex) => ({ ...ex, reps: 20 }));
+}
+
+function getCoolDown() {
+  return EXERCISES.filter((e) => COOLDOWN_IDS.includes(e.id));
+}
+
+function buildCategoryPlan({ age, weightKg, heightCm, equipment, categoryId }) {
+  const meta = CATEGORIES.find((c) => c.id === categoryId);
   const { bmi } = bmiInfo(weightKg, heightCm);
 
   let pool = EXERCISES.filter(
-    (e) => categories.includes(e.category) && equipment.includes(e.equipment)
+    (e) => e.category === categoryId && equipment.includes(e.equipment)
   );
-  if (pool.length < 5) {
-    // fall back to any equipment the user has, across the same categories
-    pool = EXERCISES.filter((e) => categories.includes(e.category));
+  if (pool.length < 3) {
+    // fall back to any equipment for this category so the list never feels empty
+    pool = EXERCISES.filter((e) => e.category === categoryId);
   }
 
-  // simple deterministic shuffle seeded by day, so it feels fresh but stable within the day
-  const seeded = [...pool].sort((a, b) => (a.id + day).localeCompare(b.id + day));
-  let picks = seeded.slice(0, Math.min(6, seeded.length));
-
-  // adjust reps by age & BMI
-  picks = picks.map((ex) => {
+  const picks = pool.map((ex) => {
     let reps = ex.reps;
-    let sets = ex.sets;
     let note = null;
     if (age >= 55) {
       reps = ex.holdSeconds ? reps : Math.max(8, Math.round(reps * 0.8));
@@ -147,10 +186,10 @@ function pickPlan({ age, weightKg, heightCm, equipment, day, focusOverride }) {
     if (bmi >= 28 && !ex.holdSeconds) {
       reps = Math.round(reps * 1.15);
     }
-    return { ...ex, reps, sets, note };
+    return { ...ex, reps, note };
   });
 
-  return { split, picks, bmi };
+  return { meta, picks, bmi };
 }
 
 /* ------------------------------------------------------------------ */
@@ -393,28 +432,98 @@ function StickFigure({ anim }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  REST TIMER                                                         */
+/* ------------------------------------------------------------------ */
+function RestTimer() {
+  const [seconds, setSeconds] = useState(60);
+  const [running, setRunning] = useState(false);
+  const intervalRef = useRef(null);
+
+  useEffect(() => {
+    if (running) {
+      intervalRef.current = setInterval(() => {
+        setSeconds((s) => {
+          if (s <= 1) {
+            clearInterval(intervalRef.current);
+            setRunning(false);
+            return 0;
+          }
+          return s - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [running]);
+
+  const adjust = (delta) => {
+    setRunning(false);
+    setSeconds((s) => Math.max(15, Math.min(240, s + delta)));
+  };
+
+  const reset = () => {
+    setRunning(false);
+    setSeconds(60);
+  };
+
+  const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const ss = String(seconds % 60).padStart(2, "0");
+
+  return (
+    <div className="rest-timer">
+      <div className="rest-timer-left">
+        <Timer size={15} />
+        <span className="rest-timer-clock">{mm}:{ss}</span>
+      </div>
+      <div className="rest-timer-actions">
+        <button type="button" className="rest-btn" onClick={() => adjust(-15)}>-15s</button>
+        <button type="button" className="rest-btn rest-btn-primary" onClick={() => setRunning((r) => !r)}>
+          {running ? "Pause" : seconds === 0 ? "Restart" : "Rest"}
+        </button>
+        <button type="button" className="rest-btn" onClick={() => adjust(15)}>+15s</button>
+        <button type="button" className="rest-btn rest-btn-icon" onClick={reset} aria-label="Reset timer">
+          <RotateCcw size={13} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  EXERCISE CARD                                                      */
 /* ------------------------------------------------------------------ */
-function ExerciseCard({ ex, index }) {
+function ExerciseCard({ ex, index, done, onToggleDone }) {
   const [open, setOpen] = useState(index === 0);
   return (
-    <div className="ex-card">
-      <button className="ex-head" onClick={() => setOpen((o) => !o)}>
-        <div className="ex-num">{String(index + 1).padStart(2, "0")}</div>
-        <div className="ex-title">
-          <div className="ex-name">{ex.name}</div>
-          <div className="ex-tags">
-            <span className="tag tag-target">{ex.target}</span>
-            <span className="tag">{ex.equipment === "bodyweight" ? "Bodyweight" : ex.equipment === "dumbbell" ? "Dumbbell" : "Band"}</span>
+    <div className={"ex-card" + (done ? " ex-card-done" : "")}>
+      <div className="ex-head">
+        <button
+          type="button"
+          className="ex-check"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleDone();
+          }}
+          aria-label={done ? "Mark not done" : "Mark done"}
+        >
+          {done ? <CheckCircle2 size={22} /> : <Circle size={22} />}
+        </button>
+        <button className="ex-head-main" onClick={() => setOpen((o) => !o)}>
+          <div className="ex-num">{String(index + 1).padStart(2, "0")}</div>
+          <div className="ex-title">
+            <div className="ex-name">{ex.name}</div>
+            <div className="ex-tags">
+              <span className="tag tag-target">{ex.target}</span>
+              <span className="tag">{ex.equipment === "bodyweight" ? "Bodyweight" : ex.equipment === "dumbbell" ? "Dumbbell" : "Band"}</span>
+            </div>
           </div>
-        </div>
-        <div className="ex-scoreboard">
-          <span className="scoreboard-num">{ex.sets}</span>
-          <span className="scoreboard-x">×</span>
-          <span className="scoreboard-num">{ex.reps}{ex.holdSeconds ? "s" : ""}</span>
-        </div>
-        {open ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-      </button>
+          <div className="ex-scoreboard">
+            <span className="scoreboard-num">{ex.sets}</span>
+            <span className="scoreboard-x">×</span>
+            <span className="scoreboard-num">{ex.reps}{ex.holdSeconds ? "s" : ""}</span>
+          </div>
+          {open ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+        </button>
+      </div>
       {open && (
         <div className="ex-body">
           <div className="ex-demo">
@@ -427,6 +536,7 @@ function ExerciseCard({ ex, index }) {
                 <li key={i}>{c}</li>
               ))}
             </ul>
+            <RestTimer />
           </div>
         </div>
       )}
@@ -440,45 +550,64 @@ function ExerciseCard({ ex, index }) {
 export default function TodayFit() {
   useGoogleFonts();
 
-  const [stage, setStage] = useState("form"); // form | plan
+  const [stage, setStage] = useState("form"); // form | category | plan
   const [age, setAge] = useState(30);
   const [heightCm, setHeightCm] = useState(170);
   const [weightKg, setWeightKg] = useState(70);
   const [equipment, setEquipment] = useState(["bodyweight"]);
-  const [shuffleSeed, setShuffleSeed] = useState(0);
+  const [selectedCategory, setSelectedCategory] = useState(null);
+  const [completed, setCompleted] = useState({});
+  const [history, setHistory] = useState([]);
 
-  const today = useMemo(() => new Date(), []);
-  const dayIdx = today.getDay();
-  const dayName = today.toLocaleDateString(undefined, { weekday: "long" });
+  useEffect(() => {
+    setHistory(loadHistory());
+  }, []);
 
   const toggleEquip = (id) => {
     setEquipment((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
+  const toggleDone = (id) => {
+    setCompleted((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const activeEquipment = equipment.length ? equipment : ["bodyweight"];
+
+  const categoryCounts = useMemo(() => {
+    const counts = {};
+    CATEGORIES.forEach((c) => {
+      const matched = EXERCISES.filter((e) => e.category === c.id && activeEquipment.includes(e.equipment));
+      counts[c.id] = matched.length >= 1 ? matched.length : EXERCISES.filter((e) => e.category === c.id).length;
+    });
+    return counts;
+  }, [equipment]);
+
   const plan = useMemo(() => {
-    if (stage !== "plan") return null;
-    return pickPlan({
+    if (stage !== "plan" || !selectedCategory) return null;
+    return buildCategoryPlan({
       age: Number(age),
       weightKg: Number(weightKg),
       heightCm: Number(heightCm),
-      equipment: equipment.length ? equipment : ["bodyweight"],
-      day: dayIdx,
+      equipment: activeEquipment,
+      categoryId: selectedCategory,
     });
-  }, [stage, age, weightKg, heightCm, equipment, dayIdx, shuffleSeed]);
+  }, [stage, selectedCategory, age, weightKg, heightCm, equipment]);
 
-  // shuffle within the same day's category pool
-  const shuffledPicks = useMemo(() => {
-    if (!plan) return [];
-    if (shuffleSeed === 0) return plan.picks;
-    const pool = EXERCISES.filter(
-      (e) => plan.split.categories.includes(e.category) && (equipment.length ? equipment : ["bodyweight"]).includes(e.equipment)
-    );
-    const source = pool.length >= 5 ? pool : EXERCISES.filter((e) => plan.split.categories.includes(e.category));
-    const seeded = [...source].sort((a, b) => (a.id + shuffleSeed).localeCompare(b.id + shuffleSeed));
-    return seeded.slice(0, Math.min(6, seeded.length)).map((ex) => ({ ...ex, note: plan.picks.find((p) => p.id === ex.id)?.note }));
-  }, [plan, shuffleSeed, equipment]);
+  const stepIndex = stage === "form" ? 0 : stage === "category" ? 1 : 2;
+  const warmUp = useMemo(() => getWarmUp(), []);
+  const coolDown = useMemo(() => getCoolDown(), []);
+  const doneCount = plan ? plan.picks.filter((ex) => completed[ex.id]).length : 0;
+  const streak = useMemo(() => computeStreak(history), [history]);
 
-  const { bmi, label: bmiLabel } = useMemo(() => bmiInfo(Number(weightKg) || 1, Number(heightCm) || 1), [weightKg, heightCm]);
+  const finishWorkout = () => {
+    if (!plan) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const entry = { date: today, category: plan.meta.label, completed: doneCount, total: plan.picks.length };
+    const next = [entry, ...history.filter((h) => !(h.date === today && h.category === plan.meta.label))].slice(0, 30);
+    setHistory(next);
+    saveHistory(next);
+    setStage("done");
+  };
 
   return (
     <div className="tf-root">
@@ -499,50 +628,73 @@ export default function TodayFit() {
           box-sizing: border-box;
         }
         .tf-root * { box-sizing: border-box; }
-        .tf-wrap { max-width: 720px; margin: 0 auto; }
+        .tf-wrap { max-width: 760px; margin: 0 auto; }
 
-        .tf-brand { display:flex; align-items:center; gap:10px; margin-bottom: 4px; }
+        .tf-brand { display:flex; align-items:center; gap:10px; margin-bottom: 18px; }
         .tf-brand .dot { width:10px; height:10px; border-radius:2px; background: var(--accent); }
         .tf-brand-name { font-family:'IBM Plex Mono'; font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color: var(--ink-soft); }
 
-        .tf-hero { font-family:'Archivo Black'; font-size: clamp(34px, 8vw, 54px); line-height:0.95; text-transform:uppercase; margin: 6px 0 4px; }
+        .tf-steps { display:flex; align-items:center; gap:8px; margin-bottom:24px; }
+        .tf-step { display:flex; align-items:center; gap:8px; font-family:'IBM Plex Mono'; font-size:12px; color: var(--ink-soft); }
+        .tf-step-dot { width:22px; height:22px; border-radius:50%; border:1.5px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; background:var(--surface); transition: all .2s ease; }
+        .tf-step.active .tf-step-dot { background: var(--ink); border-color: var(--ink); color:#fff; }
+        .tf-step.done .tf-step-dot { background: var(--accent-2); border-color: var(--accent-2); color:#fff; }
+        .tf-step.active .tf-step-label { color: var(--ink); font-weight:600; }
+        .tf-step-line { width:28px; height:1.5px; background: var(--line); }
+
+        .tf-hero { font-family:'Archivo Black'; font-size: clamp(30px, 7vw, 48px); line-height:1.02; text-transform:uppercase; margin: 6px 0 4px; }
         .tf-hero span { color: var(--accent); }
-        .tf-sub { color: var(--ink-soft); font-size:15px; margin-bottom: 26px; max-width: 46ch; }
+        .tf-sub { color: var(--ink-soft); font-size:15px; margin-bottom: 26px; max-width: 50ch; line-height:1.5; }
 
-        .tf-card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px; margin-bottom: 16px; }
+        .tf-card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 24px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(16,24,43,0.04); }
 
-        .tf-field { margin-bottom: 18px; }
-        .tf-field label { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color: var(--ink-soft); margin-bottom:8px; }
+        .tf-field { margin-bottom: 20px; }
+        .tf-field label { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color: var(--ink-soft); margin-bottom:10px; }
         .tf-row { display:flex; align-items:center; gap:14px; }
-        .tf-row input[type=range] { flex:1; accent-color: var(--accent); }
+        .tf-row input[type=range] { flex:1; accent-color: var(--accent); height: 4px; }
         .tf-val { font-family:'IBM Plex Mono'; font-weight:600; min-width: 68px; text-align:right; font-size:15px; }
 
         .tf-chip-group { display:flex; flex-wrap:wrap; gap:8px; }
         .tf-chip { border:1.5px solid var(--line); background:var(--surface); color:var(--ink); padding:9px 14px; border-radius:999px; font-size:13.5px; cursor:pointer; font-weight:500; transition: all .15s ease; }
+        .tf-chip:hover { border-color: var(--ink); }
         .tf-chip.active { background: var(--ink); border-color: var(--ink); color: #fff; }
 
-        .tf-number { width:100%; border:1.5px solid var(--line); border-radius:10px; padding:10px 12px; font-family:'IBM Plex Mono'; font-size:15px; }
-
-        .tf-submit { width:100%; background: var(--ink); color:#fff; border:none; padding:15px; border-radius:12px; font-weight:700; font-size:15px; letter-spacing:0.02em; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; }
+        .tf-submit { width:100%; background: var(--ink); color:#fff; border:none; padding:16px; border-radius:12px; font-weight:700; font-size:15px; letter-spacing:0.02em; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; transition: transform .1s ease, background .15s ease; }
         .tf-submit:hover { background:#000; }
+        .tf-submit:active { transform: scale(0.99); }
 
-        .tf-board { background: var(--ink); color:#fff; border-radius:14px; padding:22px 24px; margin-bottom:16px; position:relative; overflow:hidden; }
+        .tf-summary { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:22px; }
+        .tf-summary-item { font-family:'IBM Plex Mono'; font-size:12.5px; color: var(--ink-soft); background: var(--surface); border:1px solid var(--line); border-radius:999px; padding:6px 14px; }
+        .tf-summary-item b { color: var(--ink); font-weight:600; }
+
+        .cat-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:12px; }
+        .cat-card { position:relative; background: var(--surface); border:1px solid var(--line); border-radius:14px; padding:18px 16px; text-align:left; cursor:pointer; overflow:hidden; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+        .cat-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:4px; background: var(--accent); }
+        .cat-card:nth-child(even)::before { background: var(--accent-2); }
+        .cat-card:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(16,24,43,0.08); border-color: rgba(16,24,43,0.16); }
+        .cat-card-label { font-weight:700; font-size:16px; margin-bottom:4px; padding-left:6px; }
+        .cat-card-tone { font-size:12.5px; color: var(--ink-soft); padding-left:6px; margin-bottom:14px; line-height:1.4; }
+        .cat-card-foot { display:flex; align-items:center; justify-content:space-between; padding-left:6px; }
+        .cat-card-count { font-family:'IBM Plex Mono'; font-size:11.5px; color: var(--ink-soft); }
+        .cat-card-arrow { color: var(--ink-soft); transition: transform .15s ease, color .15s ease; }
+        .cat-card:hover .cat-card-arrow { transform: translateX(3px); color: var(--ink); }
+
+        .tf-board { background: var(--ink); color:#fff; border-radius:16px; padding:24px 26px; margin-bottom:16px; position:relative; overflow:hidden; }
         .tf-board::after { content:""; position:absolute; inset:0; background: radial-gradient(circle at 90% -10%, rgba(255,75,43,0.35), transparent 55%); pointer-events:none; }
         .tf-board-day { font-family:'IBM Plex Mono'; font-size:12.5px; letter-spacing:0.16em; text-transform:uppercase; opacity:0.65; margin-bottom:6px; }
         .tf-board-title { font-family:'Archivo Black'; font-size: clamp(26px, 6vw, 36px); text-transform:uppercase; line-height:1; margin-bottom: 6px; }
         .tf-board-tone { color: rgba(255,255,255,0.7); font-size:14px; }
 
-        .tf-stats-row { display:flex; gap:12px; margin-top:16px; flex-wrap:wrap; }
+        .tf-stats-row { display:flex; gap:12px; margin-top:18px; flex-wrap:wrap; }
         .tf-stat { background: rgba(255,255,255,0.08); border-radius:10px; padding:12px 14px; flex:1; min-width:120px; }
         .tf-stat-label { font-size:11px; text-transform:uppercase; letter-spacing:0.1em; opacity:0.6; margin-bottom:4px; }
         .tf-stat-value { font-family:'IBM Plex Mono'; font-size: 20px; font-weight:600; }
 
-        .tf-list-head { display:flex; align-items:center; justify-content:space-between; margin: 22px 0 10px; }
+        .tf-list-head { display:flex; align-items:center; justify-content:space-between; margin: 24px 0 10px; }
         .tf-list-head h3 { font-family:'Archivo Black'; text-transform:uppercase; font-size:18px; margin:0; }
-        .tf-shuffle { display:flex; align-items:center; gap:6px; background:none; border:1.5px solid var(--line); border-radius:999px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; color:var(--ink); }
-        .tf-shuffle:hover { border-color: var(--ink); }
 
-        .ex-card { background: var(--surface); border:1px solid var(--line); border-radius:14px; margin-bottom:12px; overflow:hidden; }
+        .ex-card { background: var(--surface); border:1px solid var(--line); border-radius:14px; margin-bottom:12px; overflow:hidden; transition: box-shadow .15s ease; }
+        .ex-card:hover { box-shadow: 0 4px 14px rgba(16,24,43,0.06); }
         .ex-head { width:100%; display:flex; align-items:center; gap:14px; padding:16px 18px; background:none; border:none; cursor:pointer; text-align:left; }
         .ex-num { font-family:'IBM Plex Mono'; color: var(--accent); font-weight:600; font-size:14px; }
         .ex-title { flex:1; min-width:0; }
@@ -561,10 +713,60 @@ export default function TodayFit() {
         .ex-cues ul { margin:0; padding-left:18px; }
         .ex-cues li { font-size:13.5px; color: var(--ink-soft); margin-bottom:6px; line-height:1.4; }
 
-        .tf-back { background:none; border:none; color: var(--ink-soft); font-size:13px; cursor:pointer; margin-bottom:14px; display:flex; align-items:center; gap:6px; padding:0; }
+        .tf-back { background:none; border:none; color: var(--ink-soft); font-size:13px; cursor:pointer; margin-bottom:16px; display:flex; align-items:center; gap:6px; padding:0; font-weight:500; }
+        .tf-back:hover { color: var(--ink); }
+
+        .ex-head { padding: 0; }
+        .ex-check { flex-shrink:0; background:none; border:none; cursor:pointer; color: var(--line); padding: 16px 0 16px 18px; display:flex; align-items:center; }
+        .ex-check:hover { color: var(--ink-soft); }
+        .ex-card-done .ex-check { color: var(--accent-2); }
+        .ex-head-main { flex:1; min-width:0; display:flex; align-items:center; gap:14px; padding:16px 18px 16px 10px; background:none; border:none; cursor:pointer; text-align:left; }
+        .ex-card-done .ex-name { text-decoration: line-through; color: var(--ink-soft); }
+
+        .rest-timer { margin-top:14px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; background: var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+        .rest-timer-left { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono'; font-size:14px; font-weight:600; color: var(--ink); }
+        .rest-timer-actions { display:flex; align-items:center; gap:6px; }
+        .rest-btn { font-family:'IBM Plex Mono'; font-size:11.5px; font-weight:600; border:1px solid var(--line); background: var(--surface); color: var(--ink-soft); border-radius:7px; padding:6px 9px; cursor:pointer; }
+        .rest-btn:hover { border-color: var(--ink); color: var(--ink); }
+        .rest-btn-primary { background: var(--ink); border-color: var(--ink); color:#fff; min-width:56px; }
+        .rest-btn-primary:hover { background:#000; color:#fff; }
+        .rest-btn-icon { display:flex; align-items:center; justify-content:center; padding:6px 8px; }
+
+        .split-card { background: var(--surface); border:1px solid var(--line); border-radius:16px; padding:20px 22px; margin-top:22px; }
+        .split-card-head { display:flex; align-items:center; gap:8px; font-weight:700; font-size:14px; margin-bottom:14px; color: var(--ink); }
+        .split-card-head svg { color: var(--accent); }
+        .split-row { display:grid; grid-template-columns: repeat(7, 1fr); gap:6px; }
+        .split-day { text-align:center; background: var(--bg); border-radius:8px; padding:8px 4px; }
+        .split-day-name { font-family:'IBM Plex Mono'; font-size:10.5px; font-weight:700; color: var(--ink-soft); margin-bottom:4px; }
+        .split-day-focus { font-size:10.5px; color: var(--ink); line-height:1.25; font-weight:500; }
+
+        .tf-finish { margin-top:10px; background: var(--accent-2); }
+        .tf-finish:hover { background: #00877a; }
+
+        .done-hero { text-align:center; padding: 10px 0 6px; }
+        .done-hero svg { color: var(--accent); }
+        .done-hero .tf-hero { text-align:center; }
+        .done-hero .tf-sub { margin-left:auto; margin-right:auto; text-align:center; }
+
+        .history-title { font-weight:700; font-size:13px; text-transform:uppercase; letter-spacing:0.06em; color: var(--ink-soft); margin-bottom:12px; }
+        .history-row { display:flex; align-items:center; justify-content:space-between; padding:9px 0; border-top:1px solid var(--line); font-size:13px; }
+        .history-row:first-child { border-top:none; }
+        .history-date { font-family:'IBM Plex Mono'; color: var(--ink-soft); font-size:12px; }
+        .history-cat { font-weight:600; }
+        .history-count { font-family:'IBM Plex Mono'; color: var(--accent-2); font-weight:600; }
+
+        @media (max-width: 480px) {
+          .split-row { grid-template-columns: repeat(4, 1fr); }
+          .split-day:last-child { grid-column: span 1; }
+        }
 
         .tf-disclaimer { display:flex; gap:10px; background: rgba(255,75,43,0.06); border:1px solid rgba(255,75,43,0.25); border-radius:12px; padding:14px 16px; font-size:12.5px; color: var(--ink-soft); margin-top: 20px; }
         .tf-disclaimer svg { flex-shrink:0; color: var(--accent); margin-top:1px; }
+
+        @media (max-width: 480px) {
+          .ex-demo { flex: 0 0 100%; }
+          .cat-grid { grid-template-columns: 1fr; }
+        }
 
         /* --- animations --- */
         @keyframes squatMove { 0%,100% { transform: translateY(0); } 50% { transform: translateY(22px); } }
@@ -632,10 +834,6 @@ export default function TodayFit() {
           .fig-curl-forearm, .fig-overhead-arm, .fig-row-arm, .fig-twist-arms, .fig-wrist, .fig-carry-legs,
           .fig-ext, .fig-stretch-neck { animation: none !important; }
         }
-
-        @media (max-width: 480px) {
-          .ex-demo { flex: 0 0 100%; }
-        }
       `}</style>
 
       <div className="tf-wrap">
@@ -644,10 +842,27 @@ export default function TodayFit() {
           <div className="tf-brand-name">TodayFit — your daily training plan</div>
         </div>
 
+        <div className="tf-steps">
+          <div className={"tf-step" + (stepIndex === 0 ? " active" : stepIndex > 0 ? " done" : "")}>
+            <div className="tf-step-dot">1</div>
+            <span className="tf-step-label">Details</span>
+          </div>
+          <div className="tf-step-line" />
+          <div className={"tf-step" + (stepIndex === 1 ? " active" : stepIndex > 1 ? " done" : "")}>
+            <div className="tf-step-dot">2</div>
+            <span className="tf-step-label">Workout</span>
+          </div>
+          <div className="tf-step-line" />
+          <div className={"tf-step" + (stepIndex === 2 ? " active" : "")}>
+            <div className="tf-step-dot">3</div>
+            <span className="tf-step-label">Plan</span>
+          </div>
+        </div>
+
         {stage === "form" && (
           <>
-            <h1 className="tf-hero">What should<br /><span>you train</span> today?</h1>
-            <p className="tf-sub">Tell me a bit about yourself. I'll build today's session and show every move with an animated demo — no video required.</p>
+            <h1 className="tf-hero">Tell us about<br /><span>yourself</span></h1>
+            <p className="tf-sub">Your age, height, and weight let us fine-tune reps and pacing. Next, you'll pick exactly which workout you want to do.</p>
 
             <div className="tf-card">
               <div className="tf-field">
@@ -690,48 +905,140 @@ export default function TodayFit() {
                 </div>
               </div>
 
-              <button className="tf-submit" onClick={() => { setShuffleSeed(0); setStage("plan"); }}>
-                <Sparkles size={17} /> Build today's session
+              <button className="tf-submit" onClick={() => setStage("category")}>
+                Choose your workout <ArrowRight size={17} />
               </button>
+            </div>
+          </>
+        )}
+
+        {stage === "category" && (
+          <>
+            <button className="tf-back" onClick={() => setStage("form")}>
+              <ArrowLeft size={14} /> Edit my details
+            </button>
+
+            <h1 className="tf-hero">Pick your<br /><span>workout</span></h1>
+            <p className="tf-sub">Choose the muscle group or focus you want to train today. Every exercise list adjusts to your details.</p>
+
+            <div className="tf-summary">
+              <span className="tf-summary-item"><b>{age}</b> yrs</span>
+              <span className="tf-summary-item"><b>{heightCm}</b> cm</span>
+              <span className="tf-summary-item"><b>{weightKg}</b> kg</span>
+            </div>
+
+            <div className="cat-grid">
+              {CATEGORIES.map((c) => (
+                <button
+                  key={c.id}
+                  className="cat-card"
+                  onClick={() => {
+                    setSelectedCategory(c.id);
+                    setCompleted({});
+                    setStage("plan");
+                  }}
+                  type="button"
+                >
+                  <div className="cat-card-label">{c.label}</div>
+                  <div className="cat-card-tone">{c.tone}</div>
+                  <div className="cat-card-foot">
+                    <span className="cat-card-count">{categoryCounts[c.id]} exercises</span>
+                    <ArrowRight size={15} className="cat-card-arrow" />
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <div className="split-card">
+              <div className="split-card-head">
+                <Flame size={15} />
+                <span>Suggested weekly split</span>
+              </div>
+              <div className="split-row">
+                {[
+                  ["Mon", "Chest"], ["Tue", "Back"], ["Wed", "Legs"],
+                  ["Thu", "Shoulders"], ["Fri", "Arms"], ["Sat", "Core + Cardio"], ["Sun", "Rest"],
+                ].map(([day, focus]) => (
+                  <div className="split-day" key={day}>
+                    <div className="split-day-name">{day}</div>
+                    <div className="split-day-focus">{focus}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           </>
         )}
 
         {stage === "plan" && plan && (
           <>
-            <button className="tf-back" onClick={() => setStage("form")}>← Edit my details</button>
+            <button className="tf-back" onClick={() => setStage("category")}>
+              <ArrowLeft size={14} /> Choose a different workout
+            </button>
 
             <div className="tf-board">
-              <div className="tf-board-day">{dayName}</div>
-              <div className="tf-board-title">{plan.split.label}</div>
-              <div className="tf-board-tone">{plan.split.tone}</div>
+              <div className="tf-board-day">Workout</div>
+              <div className="tf-board-title">{plan.meta.label}</div>
+              <div className="tf-board-tone">{plan.meta.tone}</div>
 
               <div className="tf-stats-row">
                 <div className="tf-stat">
                   <div className="tf-stat-label">BMI</div>
-                  <div className="tf-stat-value">{bmi}</div>
+                  <div className="tf-stat-value">{plan.bmi}</div>
                 </div>
                 <div className="tf-stat">
-                  <div className="tf-stat-label">Range</div>
-                  <div className="tf-stat-value" style={{ fontSize: 14 }}>{bmiLabel}</div>
+                  <div className="tf-stat-label">Age</div>
+                  <div className="tf-stat-value">{age}</div>
                 </div>
                 <div className="tf-stat">
-                  <div className="tf-stat-label">Moves today</div>
-                  <div className="tf-stat-value">{(shuffledPicks.length ? shuffledPicks : plan.picks).length}</div>
+                  <div className="tf-stat-label">Progress</div>
+                  <div className="tf-stat-value">{doneCount}/{plan.picks.length}</div>
                 </div>
               </div>
             </div>
 
             <div className="tf-list-head">
-              <h3>Today's moves</h3>
-              <button className="tf-shuffle" onClick={() => setShuffleSeed((s) => s + 1)}>
-                <RefreshCw size={14} /> Swap exercises
-              </button>
+              <h3><Wind size={15} style={{ verticalAlign: "-2px", marginRight: 6 }} /> Warm-up (3–5 min)</h3>
+            </div>
+            {warmUp.map((ex, i) => (
+              <ExerciseCard
+                ex={ex}
+                index={i}
+                key={"warmup-" + ex.id}
+                done={!!completed["warmup-" + ex.id]}
+                onToggleDone={() => toggleDone("warmup-" + ex.id)}
+              />
+            ))}
+
+            <div className="tf-list-head">
+              <h3>{plan.meta.label} exercises</h3>
             </div>
 
-            {(shuffledPicks.length ? shuffledPicks : plan.picks).map((ex, i) => (
-              <ExerciseCard ex={ex} index={i} key={ex.id} />
+            {plan.picks.map((ex, i) => (
+              <ExerciseCard
+                ex={ex}
+                index={i}
+                key={ex.id}
+                done={!!completed[ex.id]}
+                onToggleDone={() => toggleDone(ex.id)}
+              />
             ))}
+
+            <div className="tf-list-head">
+              <h3><Wind size={15} style={{ verticalAlign: "-2px", marginRight: 6 }} /> Cool-down &amp; stretch</h3>
+            </div>
+            {coolDown.map((ex, i) => (
+              <ExerciseCard
+                ex={ex}
+                index={i}
+                key={"cooldown-" + ex.id}
+                done={!!completed["cooldown-" + ex.id]}
+                onToggleDone={() => toggleDone("cooldown-" + ex.id)}
+              />
+            ))}
+
+            <button className="tf-submit tf-finish" onClick={finishWorkout}>
+              <Trophy size={17} /> Finish workout
+            </button>
 
             <div className="tf-disclaimer">
               <ShieldAlert size={16} />
@@ -739,6 +1046,48 @@ export default function TodayFit() {
                 This is general fitness guidance, not medical advice. Warm up before starting, stop if anything feels sharp or painful, and check with a doctor or physical therapist first if you're new to exercise, pregnant, or managing a health condition.
               </div>
             </div>
+          </>
+        )}
+
+        {stage === "done" && plan && (
+          <>
+            <div className="done-hero">
+              <Trophy size={40} />
+              <h1 className="tf-hero" style={{ marginTop: 14 }}>Workout<br /><span>logged</span></h1>
+              <p className="tf-sub">Nice work on {plan.meta.label}. Recovery matters as much as the training — hydrate, eat protein within a couple hours, and get good sleep tonight.</p>
+            </div>
+
+            <div className="tf-stats-row" style={{ marginBottom: 20 }}>
+              <div className="tf-stat" style={{ background: "var(--surface)", border: "1px solid var(--line)" }}>
+                <div className="tf-stat-label" style={{ color: "var(--ink-soft)" }}>Exercises done</div>
+                <div className="tf-stat-value" style={{ color: "var(--ink)" }}>{doneCount}/{plan.picks.length}</div>
+              </div>
+              <div className="tf-stat" style={{ background: "var(--surface)", border: "1px solid var(--line)" }}>
+                <div className="tf-stat-label" style={{ color: "var(--ink-soft)" }}><Flame size={11} style={{ verticalAlign: "-1px" }} /> Day streak</div>
+                <div className="tf-stat-value" style={{ color: "var(--ink)" }}>{streak}</div>
+              </div>
+              <div className="tf-stat" style={{ background: "var(--surface)", border: "1px solid var(--line)" }}>
+                <div className="tf-stat-label" style={{ color: "var(--ink-soft)" }}>Total sessions</div>
+                <div className="tf-stat-value" style={{ color: "var(--ink)" }}>{history.length}</div>
+              </div>
+            </div>
+
+            {history.length > 0 && (
+              <div className="tf-card">
+                <div className="history-title">Recent sessions</div>
+                {history.slice(0, 6).map((h, i) => (
+                  <div className="history-row" key={i}>
+                    <span className="history-date">{h.date}</span>
+                    <span className="history-cat">{h.category}</span>
+                    <span className="history-count">{h.completed}/{h.total}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button className="tf-submit" onClick={() => { setStage("category"); }}>
+              Train another muscle group <ArrowRight size={17} />
+            </button>
           </>
         )}
       </div>
